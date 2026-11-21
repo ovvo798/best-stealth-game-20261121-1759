@@ -1,10 +1,10 @@
-// Canvas painting: the museum floor, walls and cover, guard vision cones,
-// the thief, the artifacts, the exit and the HUD. Cones are lit where a
-// guard can see and dark where cover hides you — light is the readable
-// safety signal. Screens: title, play, paused, caught, level clear, win.
-import { GUARD_HALF_ANGLE, GUARD_SIGHT_RANGE, TILE, VIEW_H, VIEW_W } from './config.js';
-import { blocksSight, tileAt } from './world.js';
-import { STATE_CHASE, STATE_CURIOUS } from './guards.js';
+// Everything the eye sees, drawn on one canvas. The field is a fixed 1280x720 logical
+// area scaled to the window. Draw order matters: floor, light and shadow, vision cones,
+// furniture and walls (which hide the cones behind them), then fish, exit, pebbles, the
+// cat and the dogs, then the HUD and the screen overlays.
+
+import { FIELD, FONT, GUARD, PALETTE } from './config.js';
+import { GUARD_CHASE, GUARD_CURIOUS, inLight, inShadow } from './guards.js';
 
 export const SCREEN_TITLE = 'title';
 export const SCREEN_PLAY = 'play';
@@ -12,249 +12,442 @@ export const SCREEN_PAUSED = 'paused';
 export const SCREEN_CAUGHT = 'caught';
 export const SCREEN_CLEAR = 'clear';
 export const SCREEN_WIN = 'win';
+export const SCREEN_OVER = 'over';
 
 export function createRenderer(canvas) {
   const ctx = canvas.getContext('2d');
 
   function fit() {
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
-    const w = canvas.clientWidth || window.innerWidth;
-    const h = canvas.clientHeight || window.innerHeight;
-    canvas.width = Math.round(w * dpr);
-    canvas.height = Math.round(h * dpr);
-    ctx.setTransform(canvas.width / VIEW_W, 0, 0, canvas.height / VIEW_H, 0, 0);
+    const scale = Math.min(window.innerWidth / FIELD.width, window.innerHeight / FIELD.height);
+    canvas.width = Math.floor(FIELD.width * scale);
+    canvas.height = Math.floor(FIELD.height * scale);
+    return scale;
   }
 
   function drawFloor(level) {
-    ctx.fillStyle = '#1d2138';
-    ctx.fillRect(0, 0, VIEW_W, VIEW_H);
-    for (let row = 0; row < level.map.length; row++) {
-      for (let col = 0; col < level.map[row].length; col++) {
-        const tile = level.map[row][col];
-        const x = col * TILE;
-        const y = row * TILE;
-        if (tile === '#') {
-          ctx.fillStyle = '#3a3f5e';
-          ctx.fillRect(x, y, TILE, TILE);
-          ctx.fillStyle = '#4a5070';
-          ctx.fillRect(x, y, TILE, 5);
-        } else {
-          ctx.fillStyle = (col + row) % 2 === 0 ? '#232744' : '#20243d';
-          ctx.fillRect(x, y, TILE, TILE);
-          ctx.strokeStyle = 'rgba(255,255,255,0.04)';
-          ctx.strokeRect(x + 0.5, y + 0.5, TILE - 1, TILE - 1);
-        }
-        if (tile === 'C') {
-          ctx.fillStyle = '#7a5a33';
-          ctx.fillRect(x + 4, y + 4, TILE - 8, TILE - 8);
-          ctx.fillStyle = '#9a743f';
-          ctx.fillRect(x + 4, y + 4, TILE - 8, 6);
-          ctx.strokeStyle = '#5a4023';
-          ctx.strokeRect(x + 4.5, y + 4.5, TILE - 9, TILE - 9);
-        }
-        if (tile === 'B') {
-          ctx.fillStyle = '#5e2f45';
-          ctx.fillRect(x + 3, y + 12, TILE - 6, TILE - 24);
-          ctx.fillStyle = '#7a3f5c';
-          ctx.fillRect(x + 3, y + 12, TILE - 6, 5);
-        }
-      }
+    ctx.fillStyle = PALETTE.floorA;
+    ctx.fillRect(0, 0, FIELD.width, FIELD.height);
+    ctx.fillStyle = PALETTE.floorB;
+    for (let y = 0; y < FIELD.height; y += 48) {
+      if ((y / 48) % 2 === 0) ctx.fillRect(0, y, FIELD.width, 24);
     }
-  }
-
-  // A guard's vision cone, clipped by walls: march rays across the cone
-  // and stop each one where cover blocks the sight line.
-  function drawCone(level, guard, alert) {
-    const steps = 36;
-    ctx.beginPath();
-    ctx.moveTo(guard.x, guard.y);
-    for (let i = 0; i <= steps; i++) {
-      const a = guard.dir - GUARD_HALF_ANGLE + (2 * GUARD_HALF_ANGLE * i) / steps;
-      let r = GUARD_SIGHT_RANGE;
-      for (let d = 10; d <= GUARD_SIGHT_RANGE; d += 4) {
-        const px = guard.x + Math.cos(a) * d;
-        const py = guard.y + Math.sin(a) * d;
-        if (blocksSight(tileAt(level, Math.floor(px / TILE), Math.floor(py / TILE)))) { r = d; break; }
-      }
-      ctx.lineTo(guard.x + Math.cos(a) * r, guard.y + Math.sin(a) * r);
-    }
-    ctx.closePath();
-    ctx.fillStyle = alert ? 'rgba(255, 64, 64, 0.30)' : 'rgba(255, 214, 90, 0.20)';
-    ctx.fill();
-    ctx.strokeStyle = alert ? 'rgba(255, 80, 80, 0.5)' : 'rgba(255, 214, 90, 0.35)';
-    ctx.stroke();
-  }
-
-  function drawGuard(guard) {
-    const alert = guard.state === STATE_CHASE;
-    const curious = guard.state === STATE_CURIOUS;
-    ctx.save();
-    ctx.translate(guard.x, guard.y);
-    ctx.fillStyle = alert ? '#e33' : curious ? '#f8a020' : '#3fae6a';
-    ctx.beginPath();
-    ctx.arc(0, 0, 13, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#10131f';
-    ctx.beginPath();
-    ctx.arc(Math.cos(guard.dir) * 5, Math.sin(guard.dir) * 5, 5, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = alert ? '#ff8080' : '#ffffff';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(0, 0, 13, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.restore();
-    // Suspicion arc above the guard's head.
-    if (guard.suspicion > 2) {
-      ctx.strokeStyle = guard.suspicion >= 100 ? '#ff4040' : guard.suspicion >= 50 ? '#f8a020' : '#ffd65a';
-      ctx.lineWidth = 4;
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.18)';
+    ctx.lineWidth = 1;
+    for (let y = 0; y <= FIELD.height; y += 48) {
       ctx.beginPath();
-      ctx.arc(guard.x, guard.y, 20, -Math.PI / 2, -Math.PI / 2 + (Math.PI * 2 * guard.suspicion) / 100);
+      ctx.moveTo(0, y + 0.5);
+      ctx.lineTo(FIELD.width, y + 0.5);
       ctx.stroke();
     }
+    // A rug in the middle of each room, where the lamplight falls.
+    ctx.fillStyle = PALETTE.rug;
+    ctx.fillRect(480, 260, 320, 200);
+    ctx.strokeStyle = PALETTE.rugTrim;
+    ctx.lineWidth = 6;
+    ctx.strokeRect(480, 260, 320, 200);
   }
 
-  function drawThief(thief, time) {
-    const bob = thief.moving ? Math.sin(thief.stepPhase) * 1.5 : 0;
-    ctx.save();
-    ctx.translate(thief.x, thief.y + bob);
-    ctx.fillStyle = thief.sneaking ? '#7a6fd0' : '#8f7bff';
-    ctx.beginPath();
-    ctx.arc(0, 0, 12, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#10131f';
-    ctx.beginPath();
-    ctx.arc(Math.cos(thief.dir) * 4, Math.sin(thief.dir) * 4, 4.5, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = '#d8ccff';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(0, 0, 12, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.restore();
-    // Noise ring while running: what the guards can hear.
-    if (thief.running && thief.moving) {
-      const pulse = 60 + 14 * Math.sin(time * 6);
-      ctx.strokeStyle = 'rgba(143, 123, 255, 0.35)';
+  function drawLightAndShadow(level) {
+    for (const light of level.lights) {
+      ctx.fillStyle = PALETTE.lightPool;
+      ctx.beginPath();
+      ctx.arc(light.x, light.y, light.r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255, 196, 110, 0.25)';
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.arc(thief.x, thief.y, pulse, 0, Math.PI * 2);
+      ctx.arc(light.x, light.y, light.r, 0, Math.PI * 2);
       ctx.stroke();
     }
+    for (const shadow of level.shadows) {
+      ctx.fillStyle = PALETTE.shadow;
+      ctx.beginPath();
+      ctx.arc(shadow.x, shadow.y, shadow.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // Moonlight through the window: a cool wash across the top of the room.
+    ctx.fillStyle = PALETTE.moonPool;
+    ctx.fillRect(24, 24, FIELD.width - 48, 120);
   }
 
-  function drawLoot(loot, time) {
-    for (const item of loot) {
-      if (item.taken) continue;
-      const glow = 10 + 3 * Math.sin(time * 4 + item.x);
-      ctx.fillStyle = 'rgba(255, 214, 90, 0.25)';
-      ctx.beginPath();
-      ctx.arc(item.x, item.y, glow + 8, 0, Math.PI * 2);
+  function drawCone(guard) {
+    const range = GUARD.coneRange;
+    const half = GUARD.coneHalfAngle;
+    const colour = guard.state === GUARD_CHASE
+      ? PALETTE.coneAlarm
+      : guard.state === GUARD_CURIOUS
+        ? PALETTE.coneCurious
+        : PALETTE.coneCalm;
+    ctx.fillStyle = colour;
+    ctx.beginPath();
+    ctx.moveTo(guard.x, guard.y);
+    ctx.arc(guard.x, guard.y, range, guard.facing - half, guard.facing + half);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = guard.state === GUARD_CHASE ? 'rgba(255, 90, 78, 0.7)' : PALETTE.coneEdge;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(guard.x, guard.y);
+    ctx.arc(guard.x, guard.y, range, guard.facing - half, guard.facing + half);
+    ctx.closePath();
+    ctx.stroke();
+  }
+
+  function drawFurniture(level) {
+    for (const item of level.furniture) {
+      const colour = item.kind === 'sofa'
+        ? PALETTE.furnitureSoft
+        : item.kind === 'plant'
+          ? PALETTE.furnitureLeaf
+          : item.kind === 'crate'
+            ? PALETTE.furnitureCrate
+            : PALETTE.furnitureWood;
+      const top = item.kind === 'sofa'
+        ? '#8f5a6e'
+        : item.kind === 'plant'
+          ? '#4f8150'
+          : item.kind === 'crate'
+            ? '#97804f'
+            : PALETTE.furnitureWoodTop;
+      roundRect(item.x, item.y, item.w, item.h, 8);
+      ctx.fillStyle = colour;
       ctx.fill();
-      ctx.fillStyle = '#ffd65a';
-      ctx.save();
-      ctx.translate(item.x, item.y);
-      ctx.rotate(Math.PI / 4);
-      ctx.fillRect(-7, -7, 14, 14);
-      ctx.restore();
-      ctx.fillStyle = '#7a5a00';
-      ctx.beginPath();
-      ctx.arc(item.x, item.y, 3, 0, Math.PI * 2);
+      roundRect(item.x + 5, item.y + 5, item.w - 10, item.h - 10, 6);
+      ctx.fillStyle = top;
       ctx.fill();
+      ctx.fillStyle = 'rgba(244, 234, 216, 0.75)';
+      ctx.font = `600 11px ${FONT}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(item.label, item.x + item.w / 2, item.y + item.h / 2);
+    }
+    for (const wall of level.walls) {
+      ctx.fillStyle = PALETTE.wall;
+      ctx.fillRect(wall.x, wall.y, wall.w, wall.h);
+      ctx.fillStyle = PALETTE.wallTop;
+      if (wall.h <= 26) ctx.fillRect(wall.x, wall.y, wall.w, 4);
+      else ctx.fillRect(wall.x, wall.y, 4, wall.h);
     }
   }
 
-  function drawExit(exit, open, time) {
-    ctx.save();
-    ctx.translate(exit.x, exit.y);
-    ctx.fillStyle = open ? 'rgba(80, 255, 160, 0.30)' : 'rgba(120, 120, 140, 0.20)';
-    ctx.fillRect(-TILE / 2 + 3, -TILE / 2 + 3, TILE - 6, TILE - 6);
-    ctx.strokeStyle = open ? '#50ffa0' : '#888';
-    ctx.lineWidth = 3;
-    ctx.strokeRect(-TILE / 2 + 3, -TILE / 2 + 3, TILE - 6, TILE - 6);
-    ctx.fillStyle = open ? '#50ffa0' : '#aaa';
-    ctx.font = 'bold 10px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    if (open) ctx.fillText('EXIT', 0, 0);
-    ctx.restore();
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
   }
 
-  function drawHud(state, levelIndex, alarm) {
-    ctx.fillStyle = 'rgba(8, 10, 22, 0.85)';
-    ctx.fillRect(0, 0, VIEW_W, 46);
-    ctx.fillStyle = '#e8eaf6';
-    ctx.font = 'bold 16px sans-serif';
+  function drawFish(fish, time) {
+    const bob = Math.sin(time * 3 + fish.x) * 2;
+    ctx.save();
+    ctx.translate(fish.x, fish.y + bob);
+    ctx.fillStyle = PALETTE.fish;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 13, 7, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(-11, 0);
+    ctx.lineTo(-19, -6);
+    ctx.lineTo(-19, 6);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = '#12333d';
+    ctx.beginPath();
+    ctx.arc(6, -2, 1.8, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    // Sparkle so a fish reads at a glance.
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+    ctx.font = `14px ${FONT}`;
+    ctx.textAlign = 'center';
+    ctx.fillText('✦', fish.x + 14, fish.y - 12 + bob);
+  }
+
+  function drawExit(level, time) {
+    const exit = level.exit;
+    const glow = 0.5 + Math.sin(time * 2.5) * 0.2;
+    ctx.fillStyle = `rgba(159, 232, 112, ${glow * 0.25})`;
+    ctx.fillRect(exit.x - 14, exit.y - 14, exit.w + 28, exit.h + 28);
+    ctx.fillStyle = '#20242e';
+    roundRect(exit.x, exit.y, exit.w, exit.h, 10);
+    ctx.fill();
+    ctx.strokeStyle = PALETTE.exitGlow;
+    ctx.lineWidth = 3;
+    roundRect(exit.x, exit.y, exit.w, exit.h, 10);
+    ctx.stroke();
+    ctx.fillStyle = PALETTE.exitGlow;
+    ctx.font = `700 13px ${FONT}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('EXIT', exit.x + exit.w / 2, exit.y + exit.h / 2 - 6);
+    ctx.font = `11px ${FONT}`;
+    ctx.fillText('cat flap', exit.x + exit.w / 2, exit.y + exit.h / 2 + 10);
+  }
+
+  function drawPebble(pebble) {
+    ctx.fillStyle = '#cfc4ae';
+    ctx.beginPath();
+    ctx.arc(pebble.x, pebble.y, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(207, 196, 174, 0.35)';
+    ctx.beginPath();
+    ctx.arc(pebble.x, pebble.y + 6, 8, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawNoiseRing(noise, time) {
+    const age = 1 - noise.ttl / noise.maxTtl;
+    ctx.strokeStyle = `rgba(255, 255, 255, ${0.5 * (1 - age)})`;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(noise.x, noise.y, noise.radius * (0.3 + 0.7 * age), 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  function drawCat(player, time, exit) {
+    const hidden = player.hidden;
+    const atExit = player.x > exit.x - 24 && player.x < exit.x + exit.w + 24
+      && player.y > exit.y - 24 && player.y < exit.y + exit.h + 24;
+    ctx.save();
+    if (hidden) ctx.globalAlpha = 0.85;
+    ctx.translate(player.x, player.y);
+    ctx.rotate(player.facing);
+    // Tail.
+    ctx.strokeStyle = PALETTE.catDark;
+    ctx.lineWidth = 5;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(-10, 0);
+    ctx.quadraticCurveTo(-24, -8 - Math.sin(time * 6) * 3, -26, 6);
+    ctx.stroke();
+    // Body.
+    ctx.fillStyle = PALETTE.cat;
+    ctx.beginPath();
+    ctx.arc(0, 0, player.radius, 0, Math.PI * 2);
+    ctx.fill();
+    // Ears.
+    ctx.fillStyle = PALETTE.catDark;
+    ctx.beginPath();
+    ctx.moveTo(6, -10);
+    ctx.lineTo(12, -20);
+    ctx.lineTo(16, -7);
+    ctx.closePath();
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(6, 10);
+    ctx.lineTo(12, 20);
+    ctx.lineTo(16, 7);
+    ctx.closePath();
+    ctx.fill();
+    // Face: nose and eyes toward the direction of travel.
+    ctx.fillStyle = '#2b1a12';
+    ctx.beginPath();
+    ctx.arc(12, 0, 2.2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(4, -6, 2, 0, Math.PI * 2);
+    ctx.arc(4, 6, 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    if (player.sneaking && !atExit) {
+      ctx.fillStyle = 'rgba(244, 234, 216, 0.8)';
+      ctx.font = `11px ${FONT}`;
+      ctx.textAlign = 'center';
+      ctx.fillText('sneaking…', player.x, player.y - 24);
+    }
+  }
+
+  function drawGuard(guard, time) {
+    ctx.save();
+    ctx.translate(guard.x, guard.y);
+    ctx.rotate(guard.facing);
+    ctx.fillStyle = PALETTE.dog;
+    ctx.beginPath();
+    ctx.arc(0, 0, guard.radius, 0, Math.PI * 2);
+    ctx.fill();
+    // Floppy ears.
+    ctx.fillStyle = PALETTE.dogDark;
+    ctx.beginPath();
+    ctx.ellipse(-4, -13, 6, 9, 0.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(-4, 13, 6, 9, -0.5, 0, Math.PI * 2);
+    ctx.fill();
+    // Snout and nose.
+    ctx.fillStyle = '#6b5138';
+    ctx.beginPath();
+    ctx.ellipse(12, 0, 8, 6, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#1d1410';
+    ctx.beginPath();
+    ctx.arc(18, 0, 3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    // Suspicion arc above the head.
+    if (guard.suspicion > 4) {
+      const width = 34;
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+      ctx.fillRect(guard.x - width / 2, guard.y - guard.radius - 14, width, 6);
+      ctx.fillStyle = guard.state === GUARD_CHASE ? PALETTE.danger : PALETTE.warn;
+      ctx.fillRect(guard.x - width / 2, guard.y - guard.radius - 14, (width * guard.suspicion) / 100, 6);
+    }
+    const mark = guard.state === GUARD_CHASE ? '!' : guard.state === GUARD_CURIOUS ? '?' : '';
+    if (mark) {
+      ctx.fillStyle = guard.state === GUARD_CHASE ? PALETTE.danger : PALETTE.warn;
+      ctx.font = `700 20px ${FONT}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(mark, guard.x, guard.y - guard.radius - 26);
+    }
+    void time;
+  }
+
+  function drawHud(state) {
+    const { level, levelIndex, fishGot, fishTotal, pebblesLeft, lives, score, best, suspicion, alarm, timeLeft, ghost } = state;
+    ctx.fillStyle = PALETTE.panel;
+    ctx.fillRect(0, 0, FIELD.width, 40);
+    ctx.fillStyle = PALETTE.text;
+    ctx.font = `700 15px ${FONT}`;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    ctx.fillText(state.levelName, 14, 24);
-    ctx.font = '14px sans-serif';
-    ctx.fillStyle = '#ffd65a';
-    ctx.fillText(`Artifacts ${state.loot}/${state.lootTotal}`, 330, 24);
-    ctx.fillStyle = '#9aa0c3';
-    ctx.fillText(`Time ${Math.floor(state.time)}s`, 500, 24);
-    ctx.fillStyle = alarm ? '#ff5050' : '#50ffa0';
-    ctx.fillText(alarm ? 'ALARM — RUN!' : 'UNSEEN', 620, 24);
-    // Overall suspicion: the loudest guard's meter.
-    const s = state.maxSuspicion;
-    ctx.fillStyle = '#333';
-    ctx.fillRect(760, 10, 180, 16);
-    ctx.fillStyle = s >= 100 ? '#ff4040' : s >= 50 ? '#f8a020' : '#ffd65a';
-    ctx.fillRect(760, 10, 180 * (s / 100), 16);
-    ctx.strokeStyle = '#888';
-    ctx.strokeRect(760.5, 10.5, 180, 16);
-    ctx.fillStyle = '#e8eaf6';
-    ctx.font = '12px sans-serif';
-    ctx.fillText('Suspicion', 760, 40);
+    ctx.fillText(level.name, 16, 21);
+    ctx.font = `14px ${FONT}`;
+    ctx.fillStyle = PALETTE.muted;
+    ctx.fillText(`Fish ${fishGot}/${fishTotal}   Pebbles ${pebblesLeft}   Lives ${'♥'.repeat(lives)}${'♡'.repeat(3 - lives)}`, 220, 21);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = PALETTE.text;
+    ctx.fillText(`Score ${score}   Best ${best}`, FIELD.width - 16, 21);
+    // The suspicion meter: the one number the player watches.
+    const meterW = 260;
+    const meterX = FIELD.width / 2 - meterW / 2;
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+    ctx.fillRect(meterX - 2, 8, meterW + 4, 24);
+    const colour = alarm ? PALETTE.danger : suspicion >= 55 ? PALETTE.warn : PALETTE.ok;
+    ctx.fillStyle = colour;
+    ctx.fillRect(meterX, 10, (meterW * Math.min(100, suspicion)) / 100, 20);
+    ctx.fillStyle = PALETTE.text;
+    ctx.font = `700 12px ${FONT}`;
+    ctx.textAlign = 'center';
+    ctx.fillText(alarm ? 'ALARM — RUN!' : suspicion >= 55 ? 'SUSPICIOUS…' : 'UNSEEN', FIELD.width / 2, 21);
+    ctx.fillStyle = PALETTE.muted;
+    ctx.font = `12px ${FONT}`;
+    ctx.textAlign = 'left';
+    ctx.fillText(`Time ${timeLeft}s`, 16, 58);
+    if (ghost) {
+      ctx.fillStyle = PALETTE.ok;
+      ctx.textAlign = 'right';
+      ctx.fillText('GHOST — never spotted', FIELD.width - 16, 58);
+    }
+    void levelIndex;
+  }
+
+  function drawHint(state) {
+    ctx.fillStyle = 'rgba(20, 16, 28, 0.7)';
+    ctx.fillRect(0, FIELD.height - 26, FIELD.width, 26);
+    ctx.fillStyle = PALETTE.muted;
+    ctx.font = `12px ${FONT}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(
+      'WASD / arrows move · Hold Shift to sneak · Space to dash (loud!) · Click to throw a pebble · P pause · M mute',
+      FIELD.width / 2,
+      FIELD.height - 13,
+    );
+    void state;
   }
 
   function overlay(title, lines, accent) {
-    ctx.fillStyle = 'rgba(5, 7, 16, 0.78)';
-    ctx.fillRect(0, 0, VIEW_W, VIEW_H);
-    ctx.textAlign = 'center';
+    ctx.fillStyle = 'rgba(10, 8, 18, 0.62)';
+    ctx.fillRect(0, 0, FIELD.width, FIELD.height);
+    ctx.fillStyle = PALETTE.panel;
+    roundRect(FIELD.width / 2 - 330, FIELD.height / 2 - 150, 660, 300, 14);
+    ctx.fill();
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 2;
+    roundRect(FIELD.width / 2 - 330, FIELD.height / 2 - 150, 660, 300, 14);
+    ctx.stroke();
     ctx.fillStyle = accent;
-    ctx.font = 'bold 44px sans-serif';
-    ctx.fillText(title, VIEW_W / 2, 220);
-    ctx.fillStyle = '#e8eaf6';
-    ctx.font = '19px sans-serif';
-    lines.forEach((line, i) => ctx.fillText(line, VIEW_W / 2, 280 + i * 32));
+    ctx.font = `700 34px ${FONT}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(title, FIELD.width / 2, FIELD.height / 2 - 96);
+    ctx.fillStyle = PALETTE.text;
+    ctx.font = `16px ${FONT}`;
+    lines.forEach((line, i) => {
+      ctx.fillText(line, FIELD.width / 2, FIELD.height / 2 - 44 + i * 30);
+    });
+  }
+
+  function drawTitle(state, time) {
+    overlay('MOONLIGHT PANTRY', [
+      'Miso the cat is hungry. Three fish, three houses,',
+      'and dogs with very good eyes. Reach the cat flap unseen.',
+      '',
+      'Click or press Enter to start · Shift sneaks · Space dashes',
+    ], PALETTE.exitGlow);
+    void state;
+    void time;
   }
 
   return {
     fit,
+    /** Paint everything for the current screen. `state` is the game's draw state. */
     draw(state, screen, time) {
-      fit();
-      if (screen === SCREEN_TITLE) {
-        drawFloor(state.level);
-        for (const g of state.guards) drawCone(state.level, g, false);
-        for (const g of state.guards) drawGuard(g);
-        drawLoot(state.loot, time);
-        drawExit(state.exit, false, time);
-        overlay('NIGHT SHIFT', [
-          'The Gallery Heist — steal every artifact, reach the exit unseen.',
-          'WASD / arrows to move · hold Shift to sneak · running is loud.',
-          'Guards patrol — learn their routes. Their cones are what they see.',
-          'Suspicion fills in the light and fades in cover. 100 means alarm.',
-          'Press Enter or click to begin · P pauses · M mutes',
-        ], '#ffd65a');
-        return;
+      const scale = fit();
+      ctx.setTransform(scale, 0, 0, scale, 0, 0);
+      const level = state.level;
+      drawFloor(level);
+      drawLightAndShadow(level);
+      for (const guard of state.guards) drawCone(guard);
+      drawFurniture(level);
+      for (const fish of state.fish) {
+        if (!fish.taken) drawFish(fish, time);
       }
-      drawFloor(state.level);
-      for (const g of state.guards) drawCone(state.level, g, g.state === STATE_CHASE);
-      drawLoot(state.loot, time);
-      drawExit(state.exit, state.lootTaken >= state.lootTotal, time);
-      for (const g of state.guards) drawGuard(g);
-      drawThief(state.thief, time);
-      const alarm = state.guards.some((g) => g.state === STATE_CHASE);
-      drawHud({ ...state, maxSuspicion: Math.max(0, ...state.guards.map((g) => g.suspicion)), loot: state.lootTaken, lootTotal: state.lootTotal }, state.levelIndex, alarm);
+      drawExit(level, time);
+      for (const noise of state.noises) drawNoiseRing(noise, time);
+      for (const pebble of state.pebbles) drawPebble(pebble);
+      drawCat(state.player, time, level.exit);
+      for (const guard of state.guards) drawGuard(guard, time);
+      drawHud(state);
+      if (screen === SCREEN_PLAY) drawHint(state);
+      if (screen === SCREEN_TITLE) drawTitle(state, time);
       if (screen === SCREEN_PAUSED) {
-        overlay('PAUSED', ['Take a breath. The guards wait for no one.', 'Press P or Enter to resume.'], '#9aa0c3');
-      } else if (screen === SCREEN_CAUGHT) {
-        overlay('CAUGHT!', ['A guard laid hands on you. The night resets.', 'Press Enter to try this wing again.'], '#ff5050');
-      } else if (screen === SCREEN_CLEAR) {
-        overlay('WING CLEARED', [`Every artifact is yours. ${state.clearNote}`, 'Press Enter for the next wing.'], '#50ffa0');
-      } else if (screen === SCREEN_WIN) {
-        overlay('THE PERFECT HEIST', [`All ${state.lootTotalAll} artifacts, ${Math.floor(state.time)} seconds, never caught.`, `Best clear: ${state.best}s — press Enter to play again.`], '#ffd65a');
+        overlay('PAUSED', ['Take a breath. The dogs are waiting.', '', 'Press P or click to keep sneaking.'], PALETTE.warn);
+      }
+      if (screen === SCREEN_CAUGHT) {
+        overlay('CAUGHT!', [
+          `A dog got Miso. ${state.lives} ${state.lives === 1 ? 'life' : 'lives'} left.`,
+          'The dogs settle back to their patrol…',
+          '',
+          'Click or press Enter to try the room again.',
+        ], PALETTE.danger);
+      }
+      if (screen === SCREEN_CLEAR) {
+        overlay('ROOM CLEAR!', [
+          `Fish ${state.fishGot}/${state.fishTotal} · Score ${state.score}`,
+          state.ghost ? 'Ghost bonus: never spotted. +150' : 'Spotted once — the ghost bonus slipped away.',
+          '',
+          'Click or press Enter for the next house.',
+        ], PALETTE.ok);
+      }
+      if (screen === SCREEN_WIN) {
+        overlay('EVERY FISH STOLEN!', [
+          `Final score ${state.score} · Best ${state.best}`,
+          'Miso naps in the sun, full and unseen.',
+          '',
+          'Click or press Enter to play again.',
+        ], PALETTE.exitGlow);
+      }
+      if (screen === SCREEN_OVER) {
+        overlay('THE DOGS WIN', [
+          `Score ${state.score} · Best ${state.best}`,
+          'Miso is back on the porch, plotting.',
+          '',
+          'Click or press Enter to try again.',
+        ], PALETTE.danger);
       }
     },
   };

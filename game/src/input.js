@@ -1,46 +1,79 @@
-// Keyboard and mouse input. WASD or arrows move, Shift sneaks,
-// click a floor tile to walk toward it, P pauses, M mutes, Enter confirms.
-export const ACTION_CONFIRM = 'confirm';
-export const ACTION_PAUSE = 'pause';
-export const ACTION_MUTE = 'mute';
+// Keyboard and mouse, read once a frame. Movement keys give a -1..1 direction; the
+// action bits are edge-triggered (pressed this frame, then cleared), so a held key does
+// not repeat a dash or a pause. A click is both "confirm" on menus and "throw a pebble"
+// while playing — the game decides which, from the screen it is on.
+
+export const ACTION_CONFIRM = 1;
+export const ACTION_PAUSE = 2;
+export const ACTION_DASH = 4;
+export const ACTION_MUTE = 8;
 
 export function createInput(canvas) {
   const keys = new Set();
   const state = {
-    up: false, down: false, left: false, right: false,
-    sneak: false, confirm: false, pause: false, mute: false,
-    click: null, // {x, y} in canvas pixels, consumed by the loop
+    actions: 0,
+    click: null,
+    /** The mouse position in logical field coordinates, updated on every move. */
+    mouse: { x: 640, y: 360 },
   };
 
-  function refresh() {
-    state.up = keys.has('KeyW') || keys.has('ArrowUp');
-    state.down = keys.has('KeyS') || keys.has('ArrowDown');
-    state.left = keys.has('KeyA') || keys.has('ArrowLeft');
-    state.right = keys.has('KeyD') || keys.has('ArrowRight');
-    state.sneak = keys.has('ShiftLeft') || keys.has('ShiftRight');
-  }
-
-  function press(action) {
-    state[action] = true;
-    setTimeout(() => { state[action] = false; }, 60);
+  function toField(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = 1280 / rect.width;
+    const scaleY = 720 / rect.height;
+    return { x: (clientX - rect.left) * scaleX, y: (clientY - rect.top) * scaleY };
   }
 
   window.addEventListener('keydown', (event) => {
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(event.key)) {
+      event.preventDefault();
+    }
     if (event.repeat) return;
-    keys.add(event.code);
-    if (event.code === 'Enter' || event.code === 'Space') { press(ACTION_CONFIRM); event.preventDefault(); }
-    if (event.code === 'KeyP' || event.code === 'Escape') press(ACTION_PAUSE);
-    if (event.code === 'KeyM') press(ACTION_MUTE);
-    refresh();
+    keys.add(event.key.toLowerCase());
+    if (event.key === 'Enter' || event.key === ' ') state.actions |= ACTION_CONFIRM;
+    if (event.key === 'p' || event.key === 'P' || event.key === 'Escape') state.actions |= ACTION_PAUSE;
+    if (event.key === 'm' || event.key === 'M') state.actions |= ACTION_MUTE;
   });
-  window.addEventListener('keyup', (event) => {
-    keys.delete(event.code);
-    refresh();
+  window.addEventListener('keyup', (event) => keys.delete(event.key.toLowerCase()));
+
+  canvas.addEventListener('mousemove', (event) => {
+    state.mouse = toField(event.clientX, event.clientY);
   });
-  window.addEventListener('blur', () => { keys.clear(); refresh(); });
-  canvas.addEventListener('pointerdown', (event) => {
-    const rect = canvas.getBoundingClientRect();
-    state.click = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+  canvas.addEventListener('mousedown', (event) => {
+    state.mouse = toField(event.clientX, event.clientY);
+    state.click = { x: state.mouse.x, y: state.mouse.y };
+    state.actions |= ACTION_CONFIRM;
   });
-  return state;
+
+  return {
+    /** Current movement direction from WASD or the arrow keys. */
+    direction() {
+      let x = 0;
+      let y = 0;
+      if (keys.has('a') || keys.has('arrowleft')) x -= 1;
+      if (keys.has('d') || keys.has('arrowright')) x += 1;
+      if (keys.has('w') || keys.has('arrowup')) y -= 1;
+      if (keys.has('s') || keys.has('arrowdown')) y += 1;
+      return { x, y };
+    },
+    sneaking() {
+      return keys.has('shift');
+    },
+    dashHeld() {
+      return keys.has(' ') || keys.has('spacebar');
+    },
+    takeActions() {
+      const taken = state.actions;
+      state.actions = 0;
+      return taken;
+    },
+    takeClick() {
+      const taken = state.click;
+      state.click = null;
+      return taken;
+    },
+    mouse() {
+      return state.mouse;
+    },
+  };
 }

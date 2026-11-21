@@ -1,72 +1,100 @@
-// Synthesised sound: no audio files, everything is WebAudio oscillators
-// and filtered noise, created on the first user gesture.
+// All sound is synthesised with WebAudio — no audio files. A tiny helper builds short
+// oscillator notes; the game calls the named sounds (footstep, alert, pickup, caught,
+// win, pebble) and the mute toggle. The context is created on the first user gesture,
+// so the page stays silent until play starts.
+
 export function createAudio() {
-  let ctx = null;
-  let muted = false;
-  let hum = null;
-
-  function ensure() {
-    if (ctx) return ctx;
-    const AC = window.AudioContext || window.webkitAudioContext;
-    if (!AC) return null;
-    ctx = new AC();
-    // Low room tone so the gallery never feels silent.
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = 'sine';
-    osc.frequency.value = 55;
-    gain.gain.value = 0.015;
-    osc.connect(gain).connect(ctx.destination);
-    osc.start();
-    hum = gain;
-    return ctx;
-  }
-
-  function tone(freq, dur, type, vol, when = 0) {
-    if (muted || !ensure()) return;
-    const t = ctx.currentTime + when;
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = type;
-    osc.frequency.setValueAtTime(freq, t);
-    gain.gain.setValueAtTime(0, t);
-    gain.gain.linearRampToValueAtTime(vol, t + 0.01);
-    gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    osc.connect(gain).connect(ctx.destination);
-    osc.start(t);
-    osc.stop(t + dur + 0.05);
-  }
-
-  function noiseBurst(dur, vol, cutoff) {
-    if (muted || !ensure()) return;
-    const len = Math.floor(ctx.sampleRate * dur);
-    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
-    const data = buf.getChannelData(0);
-    for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / len);
-    const src = ctx.createBufferSource();
-    src.buffer = buf;
-    const filter = ctx.createBiquadFilter();
-    filter.type = 'lowpass';
-    filter.frequency.value = cutoff;
-    const gain = ctx.createGain();
-    gain.gain.value = vol;
-    src.connect(filter).connect(gain).connect(ctx.destination);
-    src.start();
-  }
-
   return {
-    unlock() { ensure(); if (ctx && ctx.state === 'suspended') ctx.resume(); },
-    toggleMute() {
-      muted = !muted;
-      if (hum) hum.gain.value = muted ? 0 : 0.015;
-      return muted;
-    },
-    get muted() { return muted; },
-    step(sneaking) { if (!sneaking) noiseBurst(0.05, 0.05, 900); },
-    pickup() { tone(880, 0.12, 'sine', 0.12); tone(1318, 0.18, 'sine', 0.1, 0.08); },
-    spotted() { tone(220, 0.25, 'square', 0.06); tone(277, 0.25, 'square', 0.06, 0.12); },
-    alarm() { tone(440, 0.3, 'sawtooth', 0.1); tone(349, 0.3, 'sawtooth', 0.1, 0.15); tone(440, 0.4, 'sawtooth', 0.1, 0.3); },
-    caught() { tone(110, 0.7, 'sawtooth', 0.14); tone(82, 0.9, 'sawtooth', 0.12, 0.2); },
-    win() { [523, 659, 784, 1046].forEach((f, i) => tone(f, 0.25, 'triangle', 0.12, i * 0.12)); },
+    context: null,
+    muted: false,
+    padNodes: null,
   };
+}
+
+function ensure(audio) {
+  if (audio.muted) return null;
+  try {
+    if (!audio.context) audio.context = new (window.AudioContext || window.webkitAudioContext)();
+    if (audio.context.state === 'suspended') void audio.context.resume();
+    return audio.context;
+  } catch {
+    return null;
+  }
+}
+
+function tone(audio, frequency, duration, type, volume, when = 0, slideTo = null) {
+  const ctx = ensure(audio);
+  if (!ctx) return;
+  const start = ctx.currentTime + when;
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(frequency, start);
+  if (slideTo !== null) osc.frequency.exponentialRampToValueAtTime(slideTo, start + duration);
+  gain.gain.setValueAtTime(0.0001, start);
+  gain.gain.exponentialRampToValueAtTime(volume, start + 0.012);
+  gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+  osc.start(start);
+  osc.stop(start + duration + 0.05);
+}
+
+export const soundStep = (audio) => tone(audio, 180, 0.07, 'triangle', 0.05);
+export const soundDash = (audio) => tone(audio, 300, 0.22, 'sawtooth', 0.05, 0, 900);
+export const soundPebble = (audio) => tone(audio, 900, 0.08, 'square', 0.04, 0, 500);
+export const soundLand = (audio) => tone(audio, 140, 0.1, 'triangle', 0.09);
+export const soundPickup = (audio) => {
+  tone(audio, 660, 0.12, 'sine', 0.09);
+  tone(audio, 990, 0.16, 'sine', 0.09, 0.09);
+};
+export const soundAlert = (audio) => {
+  tone(audio, 220, 0.16, 'square', 0.07);
+  tone(audio, 330, 0.2, 'square', 0.07, 0.14);
+};
+export const soundCaught = (audio) => {
+  tone(audio, 392, 0.18, 'sawtooth', 0.08);
+  tone(audio, 262, 0.22, 'sawtooth', 0.08, 0.16);
+  tone(audio, 175, 0.34, 'sawtooth', 0.08, 0.36);
+};
+export const soundWin = (audio) => {
+  tone(audio, 523, 0.14, 'sine', 0.09);
+  tone(audio, 659, 0.14, 'sine', 0.09, 0.12);
+  tone(audio, 784, 0.22, 'sine', 0.09, 0.24);
+  tone(audio, 1047, 0.3, 'sine', 0.09, 0.38);
+};
+
+/** A soft two-note night pad that hums under play; started once, stopped on mute. */
+export function startPad(audio) {
+  const ctx = ensure(audio);
+  if (!ctx || audio.padNodes) return;
+  const gain = ctx.createGain();
+  gain.gain.value = 0.018;
+  gain.connect(ctx.destination);
+  const nodes = [110, 165].map((freq) => {
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.value = freq;
+    osc.connect(gain);
+    osc.start();
+    return osc;
+  });
+  audio.padNodes = { gain, nodes };
+}
+
+export function stopPad(audio) {
+  if (!audio.padNodes) return;
+  try {
+    audio.padNodes.nodes.forEach((node) => node.stop());
+    audio.padNodes.gain.disconnect();
+  } catch {
+    // Already stopped.
+  }
+  audio.padNodes = null;
+}
+
+export function toggleMute(audio) {
+  audio.muted = !audio.muted;
+  if (audio.muted) stopPad(audio);
+  return audio.muted;
 }

@@ -1,137 +1,179 @@
-// Guard brains: patrol, suspicion, alarm, chase and search.
-// A guard never fails you instantly. Seeing the thief fills suspicion;
-// at 50 the guard walks over to look, at 100 the alarm sounds and every
-// guard chases. Break line of sight and the alarm cools back down.
-import {
-  ALARM_COOLDOWN,
-  GUARD_CHASE_SPEED,
-  GUARD_HALF_ANGLE,
-  GUARD_HEAR_RADIUS,
-  GUARD_PATROL_SPEED,
-  GUARD_SEARCH_SPEED,
-  GUARD_SIGHT_RANGE,
-  SUSPICION_DECAY,
-  SUSPICION_GAIN,
-  TILE,
-} from './config.js';
-import { hasLineOfSight, moveCircle } from './world.js';
+// Guard dogs: patrol, suspicion, investigation and the alarm. A guard's only memory is
+// its suspicion (0-100), the last place it saw or heard something, and where it was going.
+// The detection rules live here; the geometry they ask about lives in vision.js.
 
-export const STATE_PATROL = 'patrol';
-export const STATE_CURIOUS = 'curious';
-export const STATE_CHASE = 'chase';
-export const STATE_SEARCH = 'search';
+import { GUARD } from './config.js';
+import { canSee, distance, lineClear, resolveCircleRects } from './vision.js';
 
-export function createGuard(def, levelIndex) {
-  const [c, r] = def.waypoints[0];
+export const GUARD_PATROL = 'patrol';
+export const GUARD_CURIOUS = 'curious';
+export const GUARD_CHASE = 'chase';
+
+/** Build a guard from a level's guard definition. */
+export function createGuard(def, index) {
   return {
-    x: c * TILE + TILE / 2,
-    y: r * TILE + TILE / 2,
-    dir: 0,
-    waypoints: def.waypoints.map(([wc, wr]) => ({ x: wc * TILE + TILE / 2, y: wr * TILE + TILE / 2 })),
-    wp: 1 % def.waypoints.length,
-    state: STATE_PATROL,
+    id: index,
+    x: def.x,
+    y: def.y,
+    radius: GUARD.radius,
+    facing: 0,
+    waypoints: def.waypoints.map((w) => ({ x: w.x, y: w.y })),
+    waypointIndex: 1,
+    state: GUARD_PATROL,
     suspicion: 0,
+    pauseLeft: 0,
+    /** Where the guard is walking to while curious or chasing. */
+    target: null,
+    /** Seconds since this guard last saw the cat. */
     unseenFor: 0,
-    pauseFor: 0,
-    investigate: null,
-    levelIndex,
+    /** Slow look-around spin while paused at a waypoint. */
+    scanAngle: 0,
+    /** Seconds left of the look-around sweep while investigating. */
+    lookLeft: 0,
   };
 }
 
-// Can this guard see the thief right now? Cone angle, range and cover all count.
-export function guardSees(level, guard, thief) {
-  const dx = thief.x - guard.x;
-  const dy = thief.y - guard.y;
-  const dist = Math.hypot(dx, dy);
-  if (dist > GUARD_SIGHT_RANGE) return 0;
-  let angle = Math.atan2(dy, dx) - guard.dir;
-  while (angle > Math.PI) angle -= Math.PI * 2;
-  while (angle < -Math.PI) angle += Math.PI * 2;
-  if (Math.abs(angle) > GUARD_HALF_ANGLE) return 0;
-  if (!hasLineOfSight(level, guard.x, guard.y, thief.x, thief.y)) return 0;
-  // Closer and head-on is harder to miss; sneaking halves the pressure.
-  const closeness = 1 - dist / GUARD_SIGHT_RANGE;
-  return closeness * (thief.sneaking ? 0.5 : 1) * (thief.running ? 1.5 : 1);
+/** How fast suspicion climbs while this guard can see the cat. */
+function spotGain(guard, player, level) {
+  const d = distance(guard, player);
+  const closeness = 1 - d / GUARD.coneRange;
+  let gain = GUARD.spotRate * (0.35 + 0.65 * closeness);
+  if (player.sneaking) gain *= 0.45;
+  if (player.dashing) gain *= 1.7;
+  if (inShadow(player, level)) gain *= 0.45;
+  if (inLight(player, level)) gain *= 1.45;
+  return gain;
 }
 
-function stepToward(level, guard, tx, ty, speed, dt) {
+export function inShadow(point, level) {
+  for (let i = 0; i < level.shadows.length; i += 1) {
+    const s = level.shadows[i];
+    if (Math.hypot(point.x - s.x, point.y - s.y) < s.r) return true;
+  }
+  return false;
+}
+
+export function inLight(point, level) {
+  for (let i = 0; i < level.lights.length; i += 1) {
+    const l = level.lights[i];
+    if (Math.hypot(point.x - l.x, point.y - l.y) < l.r) return true;
+  }
+  return false;
+}
+
+function moveToward(guard, tx, ty, speed, dt, blockers) {
   const dx = tx - guard.x;
   const dy = ty - guard.y;
-  const dist = Math.hypot(dx, dy);
-  if (dist < 2) return true;
-  const s = Math.min(dist, speed * dt);
-  guard.dir = Math.atan2(dy, dx);
-  const next = moveCircle(level, guard.x, guard.y, (dx / dist) * s, (dy / dist) * s, 13);
-  guard.x = next.x;
-  guard.y = next.y;
-  return dist <= speed * dt + 2;
+  const d = Math.hypot(dx, dy);
+  if (d < 2) return true;
+  const step = Math.min(d, speed * dt);
+  guard.x += (dx / d) * step;
+  guard.y += (dy / d) * step;
+  guard.facing = Math.atan2(dy, dx);
+  resolveCircleRects(guard, blockers);
+  return d - step < 2;
 }
 
-export function updateGuard(level, guard, thief, dt, events) {
-  const seen = guardSees(level, guard, thief);
-  if (seen > 0) {
-    guard.suspicion = Math.min(100, guard.suspicion + SUSPICION_GAIN * (0.35 + seen) * dt);
+/**
+ * Advance one guard one step. `events` is the shared level event list: the guard pushes
+ * 'alarm' when its suspicion first hits the top, and 'heard' when it starts investigating.
+ * Returns nothing; the caller reads guard.state and guard.suspicion.
+ */
+export function updateGuard(guard, dt, player, level, blockers, events) {
+  const sees = canSee(guard, player, guard.facing, GUARD.coneRange, GUARD.coneHalfAngle, blockers);
+  if (sees) {
+    guard.suspicion = Math.min(GUARD.alarmAt, guard.suspicion + spotGain(guard, player, level) * dt);
     guard.unseenFor = 0;
-    guard.investigate = { x: thief.x, y: thief.y };
-    if (guard.suspicion >= 100 && guard.state !== STATE_CHASE) {
-      guard.state = STATE_CHASE;
-      events.push({ type: 'alarm', x: guard.x, y: guard.y });
-    } else if (guard.suspicion >= 50 && guard.state === STATE_PATROL) {
-      guard.state = STATE_CURIOUS;
-      events.push({ type: 'spotted', x: guard.x, y: guard.y });
-    }
+    guard.target = { x: player.x, y: player.y };
   } else {
-    guard.suspicion = Math.max(0, guard.suspicion - SUSPICION_DECAY * dt);
+    guard.suspicion = Math.max(0, guard.suspicion - GUARD.calmRate * dt);
     guard.unseenFor += dt;
-    if (guard.state === STATE_CHASE && guard.unseenFor > ALARM_COOLDOWN) {
-      guard.state = STATE_SEARCH;
-      guard.investigate = { x: thief.x, y: thief.y };
-    }
-    if (guard.state === STATE_CURIOUS && guard.suspicion < 25) {
-      guard.state = STATE_PATROL;
-      guard.investigate = null;
-    }
   }
 
-  // Running footsteps carry: a guard close enough walks over to listen.
-  if (thief.running && thief.moving) {
-    const d = Math.hypot(thief.x - guard.x, thief.y - guard.y);
-    if (d < GUARD_HEAR_RADIUS && guard.state === STATE_PATROL) {
-      guard.state = STATE_CURIOUS;
-      guard.investigate = { x: thief.x, y: thief.y };
-      events.push({ type: 'heard', x: guard.x, y: guard.y });
-    }
+  if (guard.suspicion >= GUARD.alarmAt && guard.state !== GUARD_CHASE) {
+    guard.state = GUARD_CHASE;
+    guard.unseenFor = 0;
+    events.push({ type: 'alarm', guard });
+  }
+  if (guard.state === GUARD_PATROL && guard.suspicion >= GUARD.curiousAt) {
+    guard.state = GUARD_CURIOUS;
+    guard.lookLeft = 2.5;
+    events.push({ type: 'heard', guard });
+  }
+  if (guard.state === GUARD_CURIOUS && guard.suspicion < 12) {
+    guard.state = GUARD_PATROL;
+    guard.target = null;
   }
 
-  if (guard.state === STATE_CHASE) {
-    stepToward(level, guard, thief.x, thief.y, GUARD_CHASE_SPEED, dt);
+  if (guard.state === GUARD_CHASE) {
+    // Chase the last seen spot; while the cat is visible the target keeps updating.
+    const target = guard.target ?? { x: player.x, y: player.y };
+    moveToward(guard, target.x, target.y, GUARD.chaseSpeed, dt, blockers);
+    if (!sees && guard.unseenFor > GUARD.alarmCool) {
+      guard.state = GUARD_PATROL;
+      guard.suspicion = 30;
+      guard.target = null;
+    }
     return;
   }
-  if (guard.state === STATE_CURIOUS || guard.state === STATE_SEARCH) {
-    const target = guard.investigate;
-    if (target && stepToward(level, guard, target.x, target.y, guard.state === STATE_CURIOUS ? GUARD_SEARCH_SPEED : GUARD_PATROL_SPEED, dt)) {
-      guard.pauseFor = 1.2;
-      guard.investigate = null;
-      guard.state = guard.state === STATE_SEARCH ? STATE_PATROL : STATE_CURIOUS;
-    }
-    if (guard.pauseFor > 0) {
-      guard.pauseFor -= dt;
-      if (guard.pauseFor <= 0 && guard.state === STATE_CURIOUS && guard.suspicion < 50) {
-        guard.state = STATE_PATROL;
+
+  if (guard.state === GUARD_CURIOUS) {
+    if (guard.target) {
+      const arrived = moveToward(guard, guard.target.x, guard.target.y, GUARD.investigateSpeed, dt, blockers);
+      if (arrived) {
+        guard.lookLeft -= dt;
+        guard.facing += dt * 1.8;
+        if (guard.lookLeft <= 0) {
+          guard.state = GUARD_PATROL;
+          guard.target = null;
+        }
       }
     }
     return;
   }
 
-  // Patrol: walk the waypoints, pausing at each post to look around.
-  if (guard.pauseFor > 0) {
-    guard.pauseFor -= dt;
-    guard.dir += dt * 0.9; // scan the room while waiting
+  // Patrol: walk the waypoint loop, pausing at each stop to look around.
+  if (guard.pauseLeft > 0) {
+    guard.pauseLeft -= dt;
+    guard.facing += dt * 0.9;
     return;
   }
-  const target = guard.waypoints[guard.wp];
-  if (stepToward(level, guard, target.x, target.y, GUARD_PATROL_SPEED, dt)) {
-    guard.wp = (guard.wp + 1) % guard.waypoints.length;
-    guard.pauseFor = 0.8;
+  const next = guard.waypoints[guard.waypointIndex];
+  const arrived = moveToward(guard, next.x, next.y, GUARD.patrolSpeed, dt, blockers);
+  if (arrived) {
+    guard.waypointIndex = (guard.waypointIndex + 1) % guard.waypoints.length;
+    guard.pauseLeft = GUARD.pauseTime;
   }
+}
+
+/** Send a guard to investigate a noise at (x, y) when it is close enough to hear it. */
+export function guardHears(guard, x, y, radius) {
+  if (guard.state === GUARD_CHASE) return;
+  if (distance(guard, { x, y }) > radius) return;
+  if (guard.state === GUARD_PATROL || guard.suspicion < GUARD.curiousAt) {
+    guard.state = GUARD_CURIOUS;
+    guard.suspicion = Math.max(guard.suspicion, 40);
+    guard.target = { x, y };
+    guard.lookLeft = 2.5;
+  }
+}
+
+/** True when any guard is close enough to catch the cat right now. */
+export function guardCatches(guard, player) {
+  return guard.state === GUARD_CHASE && distance(guard, player) < GUARD.catchDistance;
+}
+
+/** The highest suspicion among the guards: what the HUD meter shows. */
+export function worstSuspicion(guards) {
+  let worst = 0;
+  for (let i = 0; i < guards.length; i += 1) worst = Math.max(worst, guards[i].suspicion);
+  return worst;
+}
+
+/** True when at least one guard is chasing. */
+export function anyChasing(guards) {
+  for (let i = 0; i < guards.length; i += 1) {
+    if (guards[i].state === GUARD_CHASE) return true;
+  }
+  return false;
 }

@@ -1,53 +1,96 @@
-// The thief: movement, sneaking, noise, loot and the exit.
-import { SNEAK_SPEED, WALK_SPEED } from './config.js';
-import { moveCircle } from './world.js';
+// The cat: walk, sneak, dash and throw pebbles. Movement is the only thing here —
+// what the movement means (noise, sight) is decided by the game and the guards.
 
-export function createThief(start) {
+import { FIELD, PLAYER } from './config.js';
+import { resolveCircleRects } from './vision.js';
+
+export function createPlayer(start) {
   return {
     x: start.x,
     y: start.y,
-    dir: 0,
-    moving: false,
+    radius: PLAYER.radius,
+    facing: -Math.PI / 2,
     sneaking: false,
-    running: false,
-    loot: 0,
-    stepPhase: 0,
+    dashing: false,
+    dashLeft: 0,
+    dashCooldownLeft: 0,
+    moving: false,
+    /** Seconds since the last footstep sound (walking is audible up close). */
+    stepTimer: 0,
   };
 }
 
-export function updateThief(level, thief, input, dt) {
-  const mx = (input.right ? 1 : 0) - (input.left ? 1 : 0);
-  const my = (input.down ? 1 : 0) - (input.up ? 1 : 0);
-  thief.moving = mx !== 0 || my !== 0;
-  thief.sneaking = Boolean(input.sneak);
-  thief.running = thief.moving && !thief.sneaking;
-  if (!thief.moving) return;
-  const len = Math.hypot(mx, my);
-  const speed = thief.sneaking ? SNEAK_SPEED : WALK_SPEED;
-  const dx = (mx / len) * speed * dt;
-  const dy = (my / len) * speed * dt;
-  thief.dir = Math.atan2(dy, dx);
-  const next = moveCircle(level, thief.x, thief.y, dx, dy, 13);
-  thief.x = next.x;
-  thief.y = next.y;
-  thief.stepPhase += dt * (thief.sneaking ? 5 : 9);
-}
+/**
+ * Move the cat one step. `move` is {x, y} in -1..1, `sneak` and `dash` are held keys.
+ * Returns 'step' when a footstep should sound, 'dash' when a dash just fired, else null.
+ */
+export function updatePlayer(player, dt, move, sneak, dash, blockers) {
+  player.sneaking = sneak && !player.dashing;
+  const length = Math.hypot(move.x, move.y);
+  const nx = length > 0.001 ? move.x / length : 0;
+  const ny = length > 0.001 ? move.y / length : 0;
+  player.moving = length > 0.001;
 
-// Pick up any artifact within reach. Returns how many were taken.
-export function collectLoot(thief, loot) {
-  let taken = 0;
-  for (const item of loot) {
-    if (item.taken) continue;
-    if (Math.hypot(item.x - thief.x, item.y - thief.y) < 26) {
-      item.taken = true;
-      thief.loot += 1;
-      taken += 1;
-    }
+  if (dash && player.dashCooldownLeft <= 0 && player.dashLeft <= 0 && player.moving) {
+    player.dashing = true;
+    player.dashLeft = PLAYER.dashTime;
+    player.dashCooldownLeft = PLAYER.dashCooldown;
   }
-  return taken;
+  if (player.dashCooldownLeft > 0) player.dashCooldownLeft -= dt;
+  if (player.dashLeft > 0) {
+    player.dashLeft -= dt;
+    if (player.dashLeft <= 0) player.dashing = false;
+  }
+
+  const speed = player.dashing
+    ? PLAYER.dashSpeed
+    : player.sneaking
+      ? PLAYER.sneakSpeed
+      : PLAYER.walkSpeed;
+  player.x += nx * speed * dt;
+  player.y += ny * speed * dt;
+  if (player.moving) player.facing = Math.atan2(ny, nx);
+  player.x = Math.max(FIELD.width * 0 + 30, Math.min(FIELD.width - 30, player.x));
+  player.y = Math.max(30, Math.min(FIELD.height - 30, player.y));
+  resolveCircleRects(player, blockers);
+
+  if (player.moving && !player.sneaking) {
+    player.stepTimer -= dt;
+    if (player.stepTimer <= 0) {
+      player.stepTimer = player.dashing ? 0.16 : 0.34;
+      return player.dashing ? 'dash' : 'step';
+    }
+  } else {
+    player.stepTimer = 0.12;
+  }
+  return null;
 }
 
-export function atExit(thief, exit, lootTotal) {
-  if (thief.loot < lootTotal) return false;
-  return Math.hypot(exit.x - thief.x, exit.y - thief.y) < 28;
+/** Start a pebble flying from the cat toward (tx, ty); returns the pebble or null. */
+export function throwPebble(player, tx, ty) {
+  const dx = tx - player.x;
+  const dy = ty - player.y;
+  const d = Math.hypot(dx, dy);
+  if (d < 12) return null;
+  const range = Math.min(d, 330);
+  return {
+    x: player.x,
+    y: player.y,
+    fromX: player.x,
+    fromY: player.y,
+    toX: player.x + (dx / d) * range,
+    toY: player.y + (dy / d) * range,
+    t: 0,
+    flight: 0.45,
+  };
+}
+
+/** Advance a pebble; returns 'landed' on the step it arrives, else null. */
+export function updatePebble(pebble, dt) {
+  pebble.t += dt / pebble.flight;
+  const k = Math.min(1, pebble.t);
+  // A little arc: the pebble rises mid-flight and drops onto the floor.
+  pebble.x = pebble.fromX + (pebble.toX - pebble.fromX) * k;
+  pebble.y = pebble.fromY + (pebble.toY - pebble.fromY) * k - Math.sin(k * Math.PI) * 26;
+  return k >= 1 ? 'landed' : null;
 }

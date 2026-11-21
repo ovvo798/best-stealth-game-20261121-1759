@@ -1,1 +1,1 @@
-[{"name":"1-title.png","query":"?shot=start"},{"name":"2-sneak.png","query":"?shot=play"},{"name":"3-alarm.png","query":"?shot=alarm"},{"name":"4-exit.png","query":"?shot=exit"}]
+[{"name":"1-title.png","query":"?shot=title&seed=7"},{"name":"2-patrol.png","query":"?shot=patrol&seed=7"},{"name":"3-alarm.png","query":"?shot=alarm&seed=7"},{"name":"4-exit.png","query":"?shot=exit&seed=7"}]
